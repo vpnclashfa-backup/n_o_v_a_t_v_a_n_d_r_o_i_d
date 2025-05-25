@@ -23,7 +23,8 @@ from selenium.webdriver.common.by import By
 URL_FILE = "urls_to_check.txt"
 TRACKING_FILE = "versions_tracker.json"
 OUTPUT_JSON_FILE = "updates_found.json"
-GITHUB_OUTPUT_FILE = os.environ.get('GITHUB_OUTPUT', 'local_github_output.txt') # برای خروجی تعداد
+# استفاده از os.getenv که روش استانداردتری است
+GITHUB_OUTPUT_FILE = os.getenv('GITHUB_OUTPUT', 'local_github_output.txt')
 
 logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
@@ -52,88 +53,107 @@ def compare_versions(current_v_str, last_v_str):
             return False
 
         if not last_v_str or last_v_str == "0.0.0":
-            logging.info("نسخه قبلی یافت نشد یا 0.0.0 بود، نسخه فعلی جدید است.")
+            logging.info(f"نسخه قبلی یافت نشد یا 0.0.0 بود. نسخه فعلی '{current_v_str}' جدید است.")
             return True
-
-        normalize_for_parse = lambda v: re.split(r'[^0-9.]', v, 1)[0].strip('.')
         
-        current_norm = normalize_for_parse(current_v_str)
-        last_norm = normalize_for_parse(last_v_str)
+        # تلاش برای تجزیه مستقیم با کتابخانه packaging
+        try:
+            parsed_current = parse(current_v_str)
+            parsed_last = parse(last_v_str)
+            
+            if parsed_current > parsed_last:
+                logging.info(f"نتیجه مقایسه (packaging.version): فعلی='{parsed_current}' > قبلی='{parsed_last}'. جدیدتر است.")
+                return True
+            elif parsed_current < parsed_last:
+                logging.info(f"نتیجه مقایسه (packaging.version): فعلی='{parsed_current}' < قبلی='{parsed_last}'. جدیدتر نیست.")
+                return False
+            else: # parsed_current == parsed_last
+                if current_v_str != last_v_str:
+                    logging.info(f"نسخه های تجزیه شده یکسان ('{parsed_current}'), اما رشته های اصلی متفاوت: فعلی='{current_v_str}', قبلی='{last_v_str}'. نتیجه مقایسه رشته ای: {current_v_str > last_v_str}")
+                    return current_v_str > last_v_str 
+                logging.info(f"نتیجه مقایسه (packaging.version): فعلی='{parsed_current}' == قبلی='{parsed_last}'. جدیدتر نیست (یا یکسان است).")
+                return False
 
-        if not current_norm:
-            logging.warning(f"نسخه فعلی '{current_v_str}' پس از نرمال سازی نامعتبر شد ('{current_norm}').")
-            return False
-        if not last_norm:
-            logging.warning(f"نسخه قبلی '{last_v_str}' پس از نرمال سازی نامعتبر شد ('{last_norm}').")
-            return True
+        except InvalidVersion:
+            logging.warning(f"InvalidVersion هنگام تجزیه مستقیم '{current_v_str}' یا '{last_v_str}'. مقایسه به صورت رشته ای.")
+            return current_v_str != last_v_str
+        except TypeError: 
+            logging.warning(f"TypeError هنگام مقایسه تجزیه شده '{current_v_str}' با '{last_v_str}'. مقایسه به صورت رشته ای.")
+            return current_v_str != last_v_str
 
-        parsed_current = parse(current_norm)
-        parsed_last = parse(last_norm)
-        is_newer = parsed_current > parsed_last
-        logging.info(f"نتیجه مقایسه (تجزیه شده): فعلی='{parsed_current}', قبلی='{parsed_last}', جدیدتر: {is_newer}")
-        return is_newer
-    except InvalidVersion as e:
-        logging.warning(f"خطای InvalidVersion هنگام مقایسه '{current_v_str}' با '{last_v_str}': {e}. مقایسه به صورت رشته ای انجام می شود.")
-        return current_v_str != last_v_str
     except Exception as e:
-        logging.error(f"خطای پیش بینی نشده هنگام مقایسه نسخه ها: {e}. مقایسه به صورت رشته ای انجام می شود.")
+        logging.error(f"خطای پیش بینی نشده هنگام مقایسه نسخه ها ('{current_v_str}' vs '{last_v_str}'): {e}. مقایسه به صورت رشته ای.")
         return current_v_str != last_v_str
+
 
 def sanitize_text(text, for_filename=False):
     """متن را پاکسازی می کند."""
     if not text: return ""
     text = text.strip()
-
-    text = re.sub(r'\((farsroid\.com|.*?)\)', '', text, flags=re.IGNORECASE).strip()
+    
+    # حذف (farsroid.com) یا موارد مشابه داخل پرانتز در ابتدا
+    text = re.sub(r'\s*\((?:farsroid\.com|www\.farsroid\.com|.*?)\)\s*$', '', text, flags=re.IGNORECASE).strip()
     
     if for_filename:
         text = text.lower()
-        text = text.replace('–', '-').replace('—', '-')
-        text = re.sub(r'[<>:"/\\|?*()]', '_', text) # پرانتزها با آندرلاین، براکت‌ها باقی می‌مانند
-        text = re.sub(r'\s+', '_', text)
-        text = text.replace('-_', '_') 
-        text = text.replace('_-', '_')
-        text = re.sub(r'_+', '_', text)
-        text = text.strip('_')
-    else: # for tracking_id
+        text = text.replace('–', '-').replace('—', '-') # تبدیل خط فاصله بلند به کوتاه
+        text = re.sub(r'[<>:"/\\|?*()]', '_', text) # کاراکترهای غیرمجاز در نام فایل با آندرلاین
+        text = re.sub(r'\s+', '_', text) # جایگزینی فاصله‌ها با آندرلاین
+        text = text.replace('-_', '_').replace('_-', '_') # تمیز کردن ترکیب آندرلاین و خط فاصله
+        text = re.sub(r'_+', '_', text) # چند آندرلاین پشت سر هم به یکی تبدیل شوند
+        text = text.strip('_') # حذف آندرلاین از ابتدا و انتها
+    else: # for tracking_id or general display
         text = text.lower()
         text = text.replace('–', '-').replace('—', '-')
-        text = re.sub(r'[\(\)\[\]]', '', text) # حذف پرانتز و براکت برای شناسه
+        # برای tracking_id، پرانتز و براکت را هم حذف می‌کنیم
+        text = re.sub(r'[\(\)\[\]]', '', text)
         text = re.sub(r'\s+', '_', text)
         text = text.strip('_')
     return text
 
 def extract_app_name_from_page(soup, page_url):
-    """تلاش برای استخراج نام برنامه از صفحه."""
+    """تلاش برای استخراج نام برنامه از صفحه (برای نام فایل و نمایش)."""
     app_name_candidate = None
-
+    
     h1_tag = soup.find('h1', class_=re.compile(r'title', re.IGNORECASE))
-    if h1_tag:
+    if h1_tag and h1_tag.text.strip():
         app_name_candidate = h1_tag.text.strip()
+        # حذف نسخه و توضیحات فارسی بعد از جداکننده‌های رایج
+        app_name_candidate = re.split(r'\s*[–—]\s*', app_name_candidate, 1)[0].strip()
+        app_name_candidate = re.split(r'\s+-\s+', app_name_candidate, 1)[0].strip() 
+        # تلاش برای حذف نسخه اگر مستقیما به نام چسبیده باشد
+        app_name_candidate = re.sub(r'\s+[vV]?\d+(\.\d+)+[a-zA-Z0-9.-]*$', '', app_name_candidate).strip()
 
     if not app_name_candidate:
         title_tag = soup.find('title')
-        if title_tag:
+        if title_tag and title_tag.text.strip():
             app_name_candidate = title_tag.text.strip()
-            app_name_candidate = re.sub(r'\s*([-|–])\s*(فارسروید|دانلود.*)$', '', app_name_candidate, flags=re.IGNORECASE).strip()
+            app_name_candidate = re.sub(r'\s*[-|–—]\s*(?:فارسروید|دانلود|اپلیکیشن|بازی|اندروید|\[.*?\]|\b[vV]?\d+(\.\d+)+[a-zA-Z0-9.-]*).*$', '', app_name_candidate, flags=re.IGNORECASE).strip()
             app_name_candidate = re.sub(r'\s*–\s*اپلیکیشن.*$', '', app_name_candidate, flags=re.IGNORECASE).strip()
+            app_name_candidate = re.sub(r'\s+[vV]?\d+(\.\d+)+[a-zA-Z0-9.-]*$', '', app_name_candidate).strip()
+
 
     if app_name_candidate:
         if app_name_candidate.lower().startswith("دانلود "):
             app_name_candidate = app_name_candidate[len("دانلود "):].strip()
-        return app_name_candidate
+        if app_name_candidate: # اگر بعد از پاکسازی خالی نشده باشد
+             return app_name_candidate
 
-    logging.info(f"نام برنامه از H1 یا Title استخراج نشد، تلاش برای استخراج از URL: {page_url}")
+    logging.info(f"نام برنامه از H1 یا Title به طور کامل استخراج نشد، تلاش برای استخراج از URL: {page_url}")
     parsed_url = urlparse(page_url)
-    path_parts = [part for part in parsed_url.path.split('/') if part]
+    path_parts = [part for part in unquote(parsed_url.path).split('/') if part]
     if path_parts:
-        guessed_name = path_parts[-1].replace('-', ' ').replace('_', ' ')
-        guessed_name = re.sub(r'\.(html|php|asp|aspx)$', '', guessed_name, flags=re.IGNORECASE).strip()
-        guessed_name = re.sub(r'^(دانلود|برنامه)\s+', '', guessed_name, flags=re.IGNORECASE).strip()
-        guessed_name = re.sub(r'\s+(?:apk|android|ios|mod|hack|premium|pro|full|unlocked|final|update)$', '', guessed_name, flags=re.IGNORECASE).strip()
-        logging.info(f"نام حدس زده شده از URL: {guessed_name.title()}")
-        return guessed_name.title()
-        
+        guessed_name = path_parts[-1]
+        guessed_name = re.sub(r'\.(apk|zip|html|php|asp|aspx)$', '', guessed_name, flags=re.IGNORECASE)
+        guessed_name = re.sub(r'[-_][vV]?\d+(\.\d+)+[a-zA-Z0-9.-]*$', '', guessed_name, flags=re.IGNORECASE)
+        guessed_name = re.sub(r'^[vV]?\d+(\.\d+)+[a-zA-Z0-9.-]*[-_]', '', guessed_name, flags=re.IGNORECASE)
+        guessed_name = ' '.join(word.capitalize() for word in re.split(r'[-_]+', guessed_name) if word)
+        guessed_name = re.sub(r'\b(دانلود|Download|برنامه|App|Apk|Mod|Hack|Premium|Pro|Full|Unlocked|Final|Update|Android|Farsroid)\b', '', guessed_name, flags=re.IGNORECASE).strip()
+        guessed_name = re.sub(r'\s+', ' ', guessed_name).strip()
+        if guessed_name:
+            logging.info(f"نام حدس زده شده از URL: {guessed_name}")
+            return guessed_name
+            
     logging.warning(f"نام برنامه از هیچ منبعی استخراج نشد. URL: {page_url}")
     return "UnknownApp"
 
@@ -157,7 +177,7 @@ def get_page_source_with_selenium(url, wait_time=20, wait_for_class="downloadbox
             logging.info(f"ChromeDriverManager در مسیر '{driver_path}' پیدا/نصب شد.")
         except Exception as e_driver_manager:
             logging.warning(f"خطا در استفاده از ChromeDriverManager: {e_driver_manager}. تلاش برای استفاده از درایور پیشفرض سیستم.")
-            service = ChromeService()
+            service = ChromeService() # Fallback to default system chromedriver if manager fails
 
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.get(url)
@@ -167,11 +187,12 @@ def get_page_source_with_selenium(url, wait_time=20, wait_for_class="downloadbox
             WebDriverWait(driver, wait_time).until(
                 EC.presence_of_element_located((By.CLASS_NAME, wait_for_class))
             )
-            time.sleep(7)
+            time.sleep(5) # زمان اضافی برای اطمینان از اجرای کامل اسکریپت‌های صفحه
             logging.info(f"عنصر با کلاس '{wait_for_class}' پیدا شد و زمان اضافی برای بارگذاری داده شد.")
         except Exception as e_wait:
-            logging.warning(f"Timeout یا خطا هنگام انتظار برای '{wait_for_class}': {e_wait}. ممکن است صفحه کامل بارگذاری نشده باشد.")
-            if driver: return driver.page_source
+            logging.warning(f"Timeout یا خطا هنگام انتظار برای '{wait_for_class}' در {url}: {e_wait}. ممکن است صفحه کامل بارگذاری نشده باشد.")
+            # حتی اگر wait ناموفق بود، سورس فعلی را برگردان
+            if driver: return driver.page_source 
             return None
 
         page_source = driver.page_source
@@ -188,9 +209,9 @@ def get_page_source_with_selenium(url, wait_time=20, wait_for_class="downloadbox
 # --- منطق خراش دادن خاص سایت فارسروید ---
 def scrape_farsroid_page(page_url, soup, tracker_data):
     updates_found_on_page = []
-    # page_app_name شامل نام کامل و توصیفی برنامه استخراج شده از صفحه است
-    page_app_name = extract_app_name_from_page(soup, page_url)
-    logging.info(f"پردازش صفحه فارسروید: {page_url} (نام برنامه استخراج شده: '{page_app_name}')")
+    # page_app_name_full نام کامل و توصیفی استخراج شده از صفحه (ممکن است شامل نسخه باشد)
+    page_app_name_full = extract_app_name_from_page(soup, page_url) 
+    logging.info(f"پردازش صفحه فارسروید: {page_url} (نام برنامه استخراج شده: '{page_app_name_full}')")
 
     download_box = soup.find('section', class_='downloadbox')
     if not download_box:
@@ -201,11 +222,9 @@ def scrape_farsroid_page(page_url, soup, tracker_data):
     download_links_ul = download_box.find('ul', class_='download-links')
     if not download_links_ul:
         logging.warning(f"لیست لینک های دانلود (ul.download-links) در {page_url} پیدا نشد.")
-        logging.info(f"محتوای HTML باکس دانلود (اگر ul پیدا نشد):\n{download_box.prettify()[:2000]}")
         return updates_found_on_page
     logging.info("لیست لینک های دانلود (ul.download-links) پیدا شد.")
-    logging.debug(f"محتوای کامل HTML تگ ul.download-links:\n{download_links_ul.prettify()}")
-
+    
     found_lis = download_links_ul.find_all('li', class_='download-link')
     logging.info(f"تعداد {len(found_lis)} آیتم li.download-link پیدا شد.")
 
@@ -222,9 +241,9 @@ def scrape_farsroid_page(page_url, soup, tracker_data):
 
         download_url = link_tag.get('href')
         if not download_url:
-             logging.warning(f"  تگ a.download-btn در li شماره {i+1} فاقد href است. رد شدن...")
-             continue
-        download_url = urljoin(page_url, download_url)
+            logging.warning(f"  تگ a.download-btn در li شماره {i+1} فاقد href است. رد شدن...")
+            continue
+        download_url = urljoin(page_url, download_url) # تبدیل URL نسبی به مطلق
 
         link_text_span = link_tag.find('span', class_='txt')
         link_text = link_text_span.text.strip() if link_text_span else "متن لینک یافت نشد"
@@ -236,91 +255,138 @@ def scrape_farsroid_page(page_url, soup, tracker_data):
         logging.info(f"  URL: {download_url}")
         logging.info(f"  متن: {link_text}")
 
-        version_match_url = re.search(r'(\d+\.\d+(?:\.\d+){0,2}(?:[.-][a-zA-Z0-9]+)*)', download_url)
-        current_version_candidate_url = version_match_url.group(1) if version_match_url else None
-        version_match_text = re.search(r'(\d+\.\d+(?:\.\d+){0,2}(?:[.-][a-zA-Z0-9]+)*)', link_text)
-        current_version_candidate_text = version_match_text.group(1) if version_match_text else None
-        current_version = current_version_candidate_url or current_version_candidate_text
+        # --- استخراج نسخه ---
+        version_regexes = [
+            # r'([vV]?\d+(?:\.\d+)+(?:[a-zA-Z_-]+\d*)*)', # v1.0.0, 2.3b, 1.2-final, 1.2.3_RC1
+            r'([vV]?\d[\d.]*[a-zA-Z\d_-]*)' # عمومی تر: v1.2.3b-RC, 10.22.alpha
+        ]
+        current_version = None
+        for vrx_pattern in version_regexes:
+            # اول از متن لینک، چون دقیق‌تر است
+            match_text = re.search(vrx_pattern, link_text)
+            if match_text:
+                current_version = match_text.group(1).lstrip('vV').strip()
+                break
+            # اگر در متن نبود، از URL
+            match_url = re.search(vrx_pattern, download_url)
+            if match_url:
+                current_version = match_url.group(1).lstrip('vV').strip()
+                break
+        
+        if not current_version: # اگر regex های اصلی چیزی پیدا نکردند، از regex قدیمی‌تر استفاده کن
+             fallback_version_regex = r'(\d+\.\d+(?:\.\d+){0,2}(?:[.-][a-zA-Z0-9]+)*)'
+             version_match_fallback_text = re.search(fallback_version_regex, link_text)
+             current_version = version_match_fallback_text.group(1) if version_match_fallback_text else None
+             if not current_version:
+                 version_match_fallback_url = re.search(fallback_version_regex, download_url)
+                 current_version = version_match_fallback_url.group(1) if version_match_fallback_url else None
 
-        if not current_version:
-            version_match_v_url = re.search(r'[vV](\d+\.\d+(?:\.\d+){0,2}(?:[.-][a-zA-Z0-9]+)*)', download_url)
-            if version_match_v_url : current_version = version_match_v_url.group(1)
-            if not current_version:
-                version_match_v_text = re.search(r'[vV](\d+\.\d+(?:\.\d+){0,2}(?:[.-][a-zA-Z0-9]+)*)', link_text)
-                if version_match_v_text: current_version = version_match_v_text.group(1)
 
         if not current_version:
             logging.warning(f"  نسخه از URL '{download_url}' یا متن '{link_text}' استخراج نشد. رد شدن...")
             continue
         logging.info(f"  نسخه استخراج شده: {current_version}")
 
-        variant = "Unknown" 
-        filename_in_url_lower = unquote(urlparse(download_url).path.split('/')[-1]).lower()
+        # --- تشخیص واریانت ---
+        variant_parts = []
+        filename_in_url_lower_decoded = unquote(urlparse(download_url).path.split('/')[-1]).lower()
         link_text_lower = link_text.lower()
-        combined_text_for_variant = filename_in_url_lower + " " + link_text_lower
+        combined_text_for_variant = filename_in_url_lower_decoded + " " + link_text_lower
+
+        if 'mod-extra' in combined_text_for_variant or 'مود اکسترا' in link_text_lower or 'موداکسترا' in link_text_lower:
+            variant_parts.append("Mod-Extra")
+        elif 'mod-lite' in combined_text_for_variant or 'مود لایت' in link_text_lower or 'مودلایت' in link_text_lower:
+            variant_parts.append("Mod-Lite")
+        elif 'mod' in combined_text_for_variant or 'مود' in link_text_lower:
+            variant_parts.append("Mod")
 
         if 'premium' in combined_text_for_variant or 'پرمیوم' in link_text_lower:
-            variant = "Premium"
-        elif 'mod' in combined_text_for_variant or 'مود' in link_text_lower:
-            variant = "Mod"
-        elif 'lite' in combined_text_for_variant or 'لایت' in link_text_lower:
-            variant = "Lite"
-        elif 'arm64-v8a' in combined_text_for_variant or 'arm64' in combined_text_for_variant : 
-            variant = "Arm64-v8a"
-        elif 'armeabi-v7a' in combined_text_for_variant or 'armv7' in combined_text_for_variant : 
-            variant = "Armeabi-v7a"
-        elif 'x86_64' in combined_text_for_variant: 
-            variant = "x86_64"
-        elif 'x86' in combined_text_for_variant: 
-            variant = "x86"
-        elif 'universal' in combined_text_for_variant or 'اصلی' in link_text_lower or 'original' in combined_text_for_variant:
-            variant = "Universal"
+            if not any(p.lower().startswith("mod") for p in variant_parts):
+                variant_parts.append("Premium")
         
-        if download_url.endswith(".zip"):
-            if "windows" in combined_text_for_variant or "ویندوز" in link_text_lower :
-                 variant = "Windows"
-            elif variant == "Unknown": # اگر همچنان ناشناخته بود و zip بود
-                 variant = "Data" 
-        elif download_url.endswith(".apk") and variant == "Unknown":
-            variant = "Universal" # پیشفرض برای APK اگر هیچ نوع دیگری تشخیص داده نشود
+        if not any("lite" in p.lower() for p in variant_parts) and ('lite' in combined_text_for_variant or 'لایت' in link_text_lower):
+            variant_parts.append("Lite")
 
-        logging.info(f"  نوع (Variant) نهایی: {variant}")
+        arch_found_in_parts = False
+        if 'arm64-v8a' in combined_text_for_variant or 'arm64' in combined_text_for_variant:
+            variant_parts.append("Arm64-v8a"); arch_found_in_parts = True
+        elif 'armeabi-v7a' in combined_text_for_variant or 'armv7' in combined_text_for_variant: # قبل از arm خالی
+            variant_parts.append("Armeabi-v7a"); arch_found_in_parts = True
+        elif 'arm' in combined_text_for_variant: # عمومی تر
+             variant_parts.append("Arm"); arch_found_in_parts = True
+        elif 'x86_64' in combined_text_for_variant:
+            variant_parts.append("x86_64"); arch_found_in_parts = True
+        elif 'x86' in combined_text_for_variant:
+            variant_parts.append("x86"); arch_found_in_parts = True
+        
+        file_extension = ".zip" if download_url.endswith(".zip") else ".apk"
+
+        if file_extension == ".zip":
+            if "windows" in combined_text_for_variant or "ویندوز" in link_text_lower:
+                if not variant_parts: variant_parts.append("Windows")
+            elif "data" in combined_text_for_variant or "دیتا" in link_text_lower or "دیتای" in link_text_lower:
+                if not variant_parts: variant_parts.append("Data")
+            elif not variant_parts:
+                variant_parts.append("Data") # پیش‌فرض برای zip اگر واریانت دیگری نبود
+
+        if file_extension == ".apk" and not variant_parts and not arch_found_in_parts:
+            if 'universal' in combined_text_for_variant or 'اصلی' in link_text_lower or 'original' in combined_text_for_variant:
+                variant_parts.append("Universal")
+        
+        if not variant_parts:
+            variant_final = "Universal" if file_extension == ".apk" else "Default"
+        else:
+            variant_final = "-".join(sorted(list(set(p for p in variant_parts if p))))
+            if not variant_final : variant_final = "Universal" if file_extension == ".apk" else "Default"
+        
+        logging.info(f"  نوع (Variant) نهایی: {variant_final}")
 
         # --- ساخت شناسه ردیابی ---
-        # page_app_name نام کاملتر استخراج شده از H1/Title است.
-        # sanitize_text با for_filename=False برای tracking_id استفاده می‌شود تا براکت‌ها و ... حذف شوند.
-        tracking_id_base_name = sanitize_text(page_app_name, for_filename=False) 
-        tracking_id_variant = sanitize_text(variant, for_filename=False)
-        tracking_id = f"{tracking_id_base_name}_{tracking_id_variant}".lower()
+        # page_app_name_full ممکن است شامل نسخه هم باشد، که برای دقت بیشتر id خوب است
+        tracking_id_base_name = sanitize_text(page_app_name_full, for_filename=False)
+        tracking_id_variant_part = sanitize_text(variant_final, for_filename=False)
+        tracking_id = f"{tracking_id_base_name}_{tracking_id_variant_part}".lower()
+        tracking_id = re.sub(r'_+', '_', tracking_id).strip('_')
+        logging.info(f"  شناسه ردیابی: {tracking_id}")
+
+        # --- ساخت نام فایل پیشنهادی ---
+        # از page_app_name_full استفاده می‌کنیم اما نسخه را از آن جدا می‌کنیم برای نام فایل
+        # این کار باعث می‌شود نام پایه فایل تمیزتر باشد.
+        app_name_for_file_base = page_app_name_full
+        # حذف نسخه از نام برنامه برای نام فایل، اگر وجود داشته باشد
+        # این الگو سعی می‌کند نسخه را در هر جای نام پیدا و حذف کند (با دقت)
+        # مثال: "NovaTV 2.2.9b" -> "NovaTV", "App Name v1.2.3" -> "App Name"
+        app_name_for_file_base = re.sub(r'\s+[vV]?\d+(\.\d+)+[a-zA-Z0-9.-]*\s*', ' ', app_name_for_file_base).strip()
+        app_name_for_file_base = re.sub(r'\s*[-–—]\s*.*$', '', app_name_for_file_base).strip() # حذف توضیحات بعد از خط فاصله
+        if not app_name_for_file_base: app_name_for_file_base = "App" # فال‌بک
+
+        app_name_sanitized = sanitize_text(app_name_for_file_base, for_filename=True)
+        variant_sanitized_for_file = sanitize_text(variant_final, for_filename=True)
+        version_for_file = sanitize_text(current_version, for_filename=True).replace('.', '_')
+
+        # ساخت نام فایل نهایی
+        filename_parts = [app_name_sanitized, f"v{version_for_file}"]
+        # فقط واریانت‌های غیرعمومی یا مهم (مثل معماری) را به نام فایل اضافه کن
+        if variant_sanitized_for_file and variant_sanitized_for_file.lower() not in ["universal", "default", "unknown", "main", "standard"]:
+            filename_parts.append(variant_sanitized_for_file)
+        elif any(arch_indicator in variant_sanitized_for_file.lower() for arch_indicator in ["arm", "x86", "data", "windows"]):
+            filename_parts.append(variant_sanitized_for_file)
+            
+        suggested_filename = "_".join(p for p in filename_parts if p) + file_extension
+        suggested_filename = re.sub(r'_+', '_', suggested_filename).strip('_')
+        logging.info(f"  نام فایل پیشنهادی: {suggested_filename}")
         
         last_known_version = tracker_data.get(tracking_id, "0.0.0")
-
         if compare_versions(current_version, last_known_version):
             logging.info(f"    => آپدیت جدید برای {tracking_id}: {current_version} (قبلی: {last_known_version})")
-            
-            # --- ساخت نام فایل پیشنهادی ---
-            # برای نام فایل، از یک نسخه ساده شده از page_app_name استفاده می‌کنیم (مثلا فقط اولین بخش قبل از – یا -)
-            # این کار برای هماهنگی با نحوه نامگذاری فایل‌ها توسط اسکریپت دانلودر در GitHub Actions است.
-            simple_app_name_base = page_app_name.split('–')[0].strip()
-            if len(simple_app_name_base) > 30 or not simple_app_name_base : # اگر با – جدا نشد یا خیلی طولانی بود
-                simple_app_name_base = page_app_name.split('-')[0].strip()
-            if len(simple_app_name_base) > 30 or not simple_app_name_base : # اگر باز هم جدا نشد یا خیلی طولانی بود
-                simple_app_name_base = page_app_name.split(' ')[0].strip()
-            
-            app_name_for_file = sanitize_text(simple_app_name_base, for_filename=True)
-            variant_for_file = sanitize_text(variant, for_filename=True)
-            
-            file_extension = ".zip" if download_url.endswith(".zip") else ".apk"
-            suggested_filename = f"{app_name_for_file}_v{current_version}_{variant_for_file}{file_extension}"
-            
             updates_found_on_page.append({
-                "app_name": page_app_name, # نام برنامه کامل و توصیفی برای نمایش در JSON
+                "app_name": page_app_name_full, # نام کامل برای نمایش
                 "version": current_version,
-                "variant": variant, # variant دقیق‌تر (مثلاً Premium, Universal, Windows)
+                "variant": variant_final,
                 "download_url": download_url,
                 "page_url": page_url,
                 "tracking_id": tracking_id,
-                "suggested_filename": suggested_filename, # نام فایل هماهنگ شده با دانلودر
+                "suggested_filename": suggested_filename,
                 "current_version_for_tracking": current_version
             })
         else:
@@ -332,19 +398,19 @@ def main():
     if not os.path.exists(URL_FILE):
         logging.error(f"فایل URL ها یافت نشد: {URL_FILE}")
         with open(OUTPUT_JSON_FILE, 'w', encoding='utf-8') as f: json.dump([], f)
-        if 'GITHUB_OUTPUT' in os.environ:
-            with open(GITHUB_OUTPUT_FILE, 'a') as gh_output: gh_output.write(f"updates_count=0\n")
-        sys.exit(1)
+        if os.getenv('GITHUB_OUTPUT'): # بررسی وجود متغیر محیطی
+            with open(GITHUB_OUTPUT_FILE, 'a', encoding='utf-8') as gh_output: gh_output.write(f"updates_count=0\n")
+        sys.exit(1) # خروج با کد خطا
 
     with open(URL_FILE, 'r', encoding='utf-8') as f:
         urls_to_process = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
     if not urls_to_process:
-        logging.info("فایل URL ها خالی است.")
+        logging.info("فایل URL ها خالی است یا فقط شامل کامنت است.")
         with open(OUTPUT_JSON_FILE, 'w', encoding='utf-8') as f: json.dump([], f)
-        if 'GITHUB_OUTPUT' in os.environ:
-            with open(GITHUB_OUTPUT_FILE, 'a') as gh_output: gh_output.write(f"updates_count=0\n")
-        return
+        if os.getenv('GITHUB_OUTPUT'):
+            with open(GITHUB_OUTPUT_FILE, 'a', encoding='utf-8') as gh_output: gh_output.write(f"updates_count=0\n")
+        return # خروج موفقیت آمیز چون کاری برای انجام نبوده
 
     tracker_data = load_tracker()
     all_updates_found = []
@@ -352,7 +418,7 @@ def main():
 
     for page_url in urls_to_process:
         logging.info(f"\n--- شروع بررسی URL: {page_url} ---")
-        page_content = get_page_source_with_selenium(page_url, wait_for_class="downloadbox")
+        page_content = get_page_source_with_selenium(page_url, wait_for_class="downloadbox") # کلاس باکس دانلود فارسروید
         
         if not page_content:
             logging.error(f"محتوای صفحه برای {page_url} با Selenium دریافت نشد. رد شدن...")
@@ -360,30 +426,27 @@ def main():
         
         try:
             soup = BeautifulSoup(page_content, 'html.parser')
-            if "farsroid.com" in page_url.lower():
+            if "farsroid.com" in page_url.lower(): # یا هر شرط دیگری برای تشخیص نوع صفحه
                 updates_on_page = scrape_farsroid_page(page_url, soup, tracker_data)
                 all_updates_found.extend(updates_on_page)
-                for update_info in updates_on_page:
-                    new_tracker_data[update_info["tracking_id"]] = update_info["current_version_for_tracking"]
+                # به‌روزرسانی new_tracker_data در اینجا انجام می‌شود چون compare_versions ممکن است نتیجه متفاوتی بدهد
+                # و ما فقط می‌خواهیم نسخه‌هایی که واقعا جدیدتر هستند را در ردیاب ذخیره کنیم.
+                # این کار در حلقه scrape_farsroid_page انجام نمی‌شود، بلکه پس از آن بر اساس all_updates_found انجام می‌شود.
             else:
                 logging.warning(f"خراش دهنده برای {page_url} پیاده سازی نشده است.")
         except Exception as e:
             logging.error(f"خطا هنگام پردازش محتوای دریافت شده از Selenium برای {page_url}: {e}", exc_info=True)
         logging.info(f"--- پایان بررسی URL: {page_url} ---")
 
-    with open(OUTPUT_JSON_FILE, 'w', encoding='utf-8') as f:
-        output_for_downloader = []
-        for item in all_updates_found:
-            output_for_downloader.append({
-                "app_name": item["app_name"],
-                "version": item["version"],
-                "variant": item["variant"], # این variant باید توسط دانلودر استفاده شود
-                "download_url": item["download_url"],
-                "page_url": item["page_url"],
-                "suggested_filename": item["suggested_filename"] 
-            })
-        json.dump(output_for_downloader, f, ensure_ascii=False, indent=2)
+    # به‌روزرسانی فایل ردیاب فقط برای آیتم‌هایی که در all_updates_found هستند
+    for update_item in all_updates_found:
+        new_tracker_data[update_item["tracking_id"]] = update_item["current_version_for_tracking"]
 
+    # نوشتن خروجی نهایی برای دانلودر (فقط آیتم‌های پیدا شده به عنوان آپدیت)
+    with open(OUTPUT_JSON_FILE, 'w', encoding='utf-8') as f:
+        json.dump(all_updates_found, f, ensure_ascii=False, indent=2)
+
+    # ذخیره فایل ردیاب به‌روز شده
     try:
         with open(TRACKING_FILE, 'w', encoding='utf-8') as f:
             json.dump(new_tracker_data, f, ensure_ascii=False, indent=2)
@@ -392,8 +455,8 @@ def main():
         logging.error(f"خطا در ذخیره فایل ردیاب {TRACKING_FILE}: {e}")
 
     num_updates = len(all_updates_found)
-    if 'GITHUB_OUTPUT' in os.environ:
-        with open(GITHUB_OUTPUT_FILE, 'a') as gh_output:
+    if os.getenv('GITHUB_OUTPUT'):
+        with open(GITHUB_OUTPUT_FILE, 'a', encoding='utf-8') as gh_output:
             gh_output.write(f"updates_count={num_updates}\n")
 
     logging.info(f"\nخلاصه: {num_updates} آپدیت پیدا شد. جزئیات در {OUTPUT_JSON_FILE}")
